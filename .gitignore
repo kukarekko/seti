@@ -1,0 +1,14 @@
+# бинарники
+/seti
+/mcast
+/mcast.exe
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# ОС
+.DS_Store
+Thumbs.db
