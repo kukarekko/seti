@@ -9,9 +9,9 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-// getMyAddr определяет локальный IP, который будет использован для
+// определяет локальный IP, который будет использован для
 // отправки в multicast-группу, а также резолвит адрес назначения.
-func getMyAddr(family, mcast string, port int) (string, *net.UDPAddr, error) {
+func getMyAddr(family, mcast string, port int, iface *net.Interface) (string, *net.UDPAddr, error) {
 	conn, err := net.Dial(family, net.JoinHostPort(mcast, strconv.Itoa(port)))
 	if err != nil {
 		return "", nil, fmt.Errorf("dial: %w", err)
@@ -24,18 +24,23 @@ func getMyAddr(family, mcast string, port int) (string, *net.UDPAddr, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve dst: %w", err)
 	}
+	if family == "udp6" && dstAddr.IP.IsLinkLocalMulticast() && iface != nil {
+		dstAddr.Zone = iface.Name
+	}
 	return myIP, dstAddr, nil
 }
 
-// CreateRecvSocket создаёт UDP-сокет, привязанный к нужному семейству,
+// создаёт UDP-сокет, привязанный к нужному семейству,
 // и подписывает его на multicast-группу.
-func CreateRecvSocket(family, mcast string, port int) (*net.UDPConn, error) {
+func CreateRecvSocket(family, mcast string, port int, iface *net.Interface) (*net.UDPConn, error) {
+	if iface == nil {
+		return nil, fmt.Errorf("no suitable interface")
+	}
 	conn, err := net.ListenUDP(family, &net.UDPAddr{Port: port})
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
 
-	iface := findDefaultIface()
 	group := &net.UDPAddr{IP: net.ParseIP(mcast)}
 
 	if family == "udp4" {
@@ -52,38 +57,69 @@ func CreateRecvSocket(family, mcast string, port int) (*net.UDPConn, error) {
 	return conn, nil
 }
 
-// createSendSocket создаёт UDP-сокет для отправки в multicast и
-// устанавливает TTL/hop limit равным 1 (в пределах одного сегмента).
-func createSendSocket(family string) (*net.UDPConn, error) {
+// создаёт UDP-сокет для отправки в multicast и
+// устанавливает TTL/hop limit равным 1.
+func createSendSocket(family string, iface *net.Interface) (*net.UDPConn, error) {
 	conn, err := net.ListenUDP(family, nil)
 	if err != nil {
 		return nil, fmt.Errorf("listen send: %w", err)
 	}
 
 	if family == "udp4" {
-		if err := ipv4.NewPacketConn(conn).SetMulticastTTL(1); err != nil {
+		pc := ipv4.NewPacketConn(conn)
+		if err := pc.SetMulticastTTL(1); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("SetMulticastTTL: %w", err)
 		}
+		if iface != nil {
+			if err := pc.SetMulticastInterface(iface); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("SetMulticastInterface: %w", err)
+			}
+		}
 	} else {
-		if err := ipv6.NewPacketConn(conn).SetMulticastHopLimit(1); err != nil {
+		pc := ipv6.NewPacketConn(conn)
+		if err := pc.SetMulticastHopLimit(1); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("SetMulticastHopLimit: %w", err)
+		}
+		if iface != nil {
+			if err := pc.SetMulticastInterface(iface); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("SetMulticastInterface: %w", err)
+			}
 		}
 	}
 	return conn, nil
 }
 
-// findDefaultIface возвращает первый поднятый не-loopback интерфейс.
-func findDefaultIface() *net.Interface {
+// возвращает первый поднятый не-loopback интерфейс.
+func findDefaultIface(family string) *net.Interface {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
 	for i := range ifaces {
 		iface := &ifaces[i]
-		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0 {
-			return iface
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if family == "udp4" && ipnet.IP.To4() != nil {
+				return iface
+			}
+			if family == "udp6" && ipnet.IP.To4() == nil && ipnet.IP.IsGlobalUnicast() {
+				return iface
+			}
 		}
 	}
 	return nil
