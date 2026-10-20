@@ -19,3 +19,4 @@ lab2/server/server
 lab2/server/uploads/*.bin
 lab2/server/uploads/*.mp4
 lab2/server/uploads/*.pdf
+lab2/server/uploads/*.jpg
