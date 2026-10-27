@@ -11,7 +11,8 @@ func (s *Server) handleClient(conn net.Conn) {
 	clientID := conn.RemoteAddr().String()
 	log.Printf("[%s] connected", clientID)
 
-	received, expected, err := receiveFile(conn, clientID, s.UploadsDir) 
+	// 5 треб: принимаем имя файла из receiveFile
+	received, expected, filename, err := receiveFile(conn, clientID, s.UploadsDir) 
 	if err != nil { 
 		log.Printf("[%s] ERROR: %v", clientID, err)
 		_ = sendStatus(conn, statusFail)
@@ -24,5 +25,6 @@ func (s *Server) handleClient(conn net.Conn) {
 	}
 	_ = sendStatus(conn, statusOK)
 	const mb = 1_000_000
-	log.Printf("[%s] DONE, %.2f MB received", clientID, float64(received)/mb)
+	// 5 треб: пишем, какой именно файл завершил отправку
+	log.Printf("[%s] DONE: file '%s' successfully received, %.2f MB", clientID, filename, float64(received)/mb)
 }

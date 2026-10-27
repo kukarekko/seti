@@ -12,42 +12,42 @@ import (
 )
 
 // прием файла по протоколу с подсчетом скорости
-func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, error) { // читает протокол, пишет файл, запускает горутину-репортёр.
+func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, string, error) { // читает протокол, пишет файл, запускает горутину-репортёр.
 	
 	nameLen, err := readUint32(conn)
 	if err != nil {
-		return 0, 0, fmt.Errorf("read name length: %w", err)
+		return 0, 0, "", fmt.Errorf("read name length: %w", err)
 	}
 	if nameLen == 0 || nameLen > maxNameLen {
-		return 0, 0, fmt.Errorf("bad name length: %d", nameLen)
+		return 0, 0, "", fmt.Errorf("bad name length: %d", nameLen)
 	} 
 
 	//чтение имени файла
 	nameBytes := make([]byte, nameLen)
 	if _, err := io.ReadFull(conn, nameBytes); err != nil {
-		return 0, 0, fmt.Errorf("read name: %w", err)
+		return 0, 0, "", fmt.Errorf("read name: %w", err)
 	}
 	rawName := string(nameBytes)
 
 	//размер
 	sizeU, err := readUint64(conn)
 	if err != nil {
-		return 0, 0, fmt.Errorf("read size: %w", err)
+		return 0, 0, "", fmt.Errorf("read size: %w", err)
 	}
 	if sizeU > maxFileSize {
-		return 0, 0, fmt.Errorf("file too large: %d", sizeU)
+		return 0, 0, "", fmt.Errorf("file too large: %d", sizeU)
 	}
 	size := int64(sizeU)
 
 	safeName, err := safeFilename(rawName) //норм имя
 	if err != nil {
-		return 0, 0, fmt.Errorf("unsafe filename %q: %w", rawName, err)
+		return 0, 0, "", fmt.Errorf("unsafe filename %q: %w", rawName, err)
 	}
 
 	dstPath := filepath.Join(uploadsDir, safeName) //склеивает компоненты пути
 	dst, err := os.Create(dstPath) //создает файл
 	if err != nil {
-		return 0, 0, fmt.Errorf("create %s: %w", dstPath, err)
+		return 0, 0, "", fmt.Errorf("create %s: %w", dstPath, err)
 	}
 	committed := false
 	defer func() {
@@ -78,7 +78,7 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, erro
 			if _, werr := dst.Write(buf[:n]); werr != nil {
 				close(stop)
 				<-reportDone
-				return received, size, fmt.Errorf("write: %w", werr)
+				return received, size, safeName, fmt.Errorf("write: %w", werr)
 			}
 			received += int64(n) // обновление счетчика принятых байт
 
@@ -100,9 +100,9 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, erro
 			close(stop)
 			<-reportDone
 			if errors.Is(err, io.EOF) {
-				return received, size, fmt.Errorf("unexpected EOF at %d/%d", received, size)
+				return received, size, safeName, fmt.Errorf("unexpected EOF at %d/%d", received, size)
 			}
-			return received, size, fmt.Errorf("read: %w", err)
+			return received, size, safeName, fmt.Errorf("read: %w", err)
 		}
 	}
 
@@ -110,10 +110,10 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, erro
 	<-reportDone
 
 	if err := dst.Sync(); err != nil { //запись на диск
-		return received, size, fmt.Errorf("sync: %w", err)
+		return received, size, safeName, fmt.Errorf("sync: %w", err)
 	}
 	committed = true 
-	return received, size, nil
+	return received, size, safeName, nil
 }
 
 //5 треб 
