@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary" 
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +30,9 @@ func (c *Client) Run() error {
 	}
 	defer conn.Close()
 
+	// 13 тайм-ауты передачи данных и ожидания ответа
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+
 	//отправка
 	if err := sendFile(conn, f, size, nameBytes); err != nil {
 		return err
@@ -43,16 +47,16 @@ func (c *Client) Run() error {
 }
 
 func sendFile(conn net.Conn, f *os.File, size int64, nameBytes []byte) error {
-	// длина имени
-	if err := writeUint32(conn, uint32(len(nameBytes))); err != nil {
+	// 12 проверка полноты отправки заголовка
+	if err := writeAll(conn, encodeUint32(uint32(len(nameBytes)))); err != nil {
 		return fmt.Errorf("write name length: %w", err)
 	}
 	//имя
-	if _, err := conn.Write(nameBytes); err != nil {
+	if err := writeAll(conn, nameBytes); err != nil {
 		return fmt.Errorf("write name: %w", err)
 	}
 	//размер
-	if err := writeUint64(conn, uint64(size)); err != nil {
+	if err := writeAll(conn, encodeUint64(uint64(size))); err != nil {
 		return fmt.Errorf("write size: %w", err)
 	}
 
@@ -68,4 +72,28 @@ func sendFile(conn net.Conn, f *os.File, size int64, nameBytes []byte) error {
 	const mb = 1_000_000
 	fmt.Printf("sent %.2f MB in %s (%.2f MB/s)\n", float64(n)/mb, elapsed, float64(n)/mb/elapsed.Seconds())
 	return nil
+}
+
+// 12 гарантированная запись всех байт
+func writeAll(w io.Writer, b []byte) error {
+	for len(b) > 0 {
+		n, err := w.Write(b)
+		if err != nil {
+			return err
+		}
+		b = b[n:]
+	}
+	return nil
+}
+
+func encodeUint32(v uint32) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return b[:]
+}
+
+func encodeUint64(v uint64) []byte {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], v)
+	return b[:]
 }

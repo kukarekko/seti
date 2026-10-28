@@ -21,17 +21,14 @@ func reportLoop(clientID string, s *speedStats, stop <-chan struct{}, done chan<
 	ticker := time.NewTicker(reportEvery)
 	defer ticker.Stop()
 
-	printed := false
 	for {
 		select {
 		case <-stop:
-			if !printed {
-				printReport(clientID, s)
-			}
+			// 9 при завершении всегда печатаем финальный отчёт
+			printReport(clientID, s)
 			return
 		case <-ticker.C:
 			printReport(clientID, s)
-			printed = true
 		}
 	}
 }
@@ -41,11 +38,20 @@ func printReport(clientID string, s *speedStats) {
 	total := s.total
 	last := s.lastBytes
 	elapsed := time.Since(s.sessionStart).Seconds()
+	// 8: длительность последнего окна
+	window := 1.0
+	if elapsed > 0 && !s.lastTick.IsZero() {
+		window = s.lastTick.Sub(s.sessionStart).Seconds()
+		if window < 1.0 {
+			window = 1.0
+		}
+	}
 	s.mu.Unlock()
 
-	const mb = 1_000_000 
+	const mb = 1_000_000
 
-	instant := float64(last) / mb 
+	// 8 делим на фактическую длительность интервала
+	instant := float64(last) / window / mb
 	var avg float64
 	if elapsed > 0 {
 		avg = float64(total) / elapsed / mb

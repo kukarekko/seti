@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"unicode/utf8" // 7
 )
 
 const (
@@ -36,6 +37,13 @@ func openAndStat(path string) (*os.File, int64, []byte, error) {
 
 	name := filepath.Base(path)
 	nameBytes := []byte(name)
+
+	// 7 проверка корректности UTF-8
+	if !utf8.Valid(nameBytes) {
+		f.Close()
+		return nil, 0, nil, fmt.Errorf("invalid UTF-8 in filename")
+	}
+
 	if len(nameBytes) == 0 || len(nameBytes) > maxNameLen {
 		f.Close()
 		return nil, 0, nil, fmt.Errorf("invalid file name length: %d", len(nameBytes))

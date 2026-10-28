@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net"
+	"time" // 10
 )
 
 // обслуживает одно TCP-соединение, посылает статус клиенту, логирует результат
@@ -11,7 +12,9 @@ func (s *Server) handleClient(conn net.Conn) {
 	clientID := conn.RemoteAddr().String()
 	log.Printf("[%s] connected", clientID)
 
-	// 5 треб: принимаем имя файла из receiveFile
+	// 10 тайм-аут чтения
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
 	received, expected, filename, err := receiveFile(conn, clientID, s.UploadsDir) 
 	if err != nil { 
 		log.Printf("[%s] ERROR: %v", clientID, err)
@@ -23,8 +26,11 @@ func (s *Server) handleClient(conn net.Conn) {
 		_ = sendStatus(conn, statusFail)
 		return
 	}
+	
+	// 10 тайм-аут записи
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	
 	_ = sendStatus(conn, statusOK)
 	const mb = 1_000_000
-	// 5 треб: пишем, какой именно файл завершил отправку
 	log.Printf("[%s] DONE: file '%s' successfully received, %.2f MB", clientID, filename, float64(received)/mb)
 }

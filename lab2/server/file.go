@@ -8,7 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync" 
 	"time"
+	"unicode/utf8" 
+)
+
+// 6  глобальные структуры для проверки занятости имён
+var (
+	namesInUse = make(map[string]bool)
+	namesMu    sync.Mutex
 )
 
 // прием файла по протоколу с подсчетом скорости
@@ -29,6 +37,11 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, stri
 	}
 	rawName := string(nameBytes)
 
+	// 7 проверка UTF-8
+	if !utf8.ValidString(rawName) {
+		return 0, 0, "", fmt.Errorf("invalid UTF-8 in filename")
+	}
+
 	//размер
 	sizeU, err := readUint64(conn)
 	if err != nil {
@@ -44,17 +57,23 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, stri
 		return 0, 0, "", fmt.Errorf("unsafe filename %q: %w", rawName, err)
 	}
 
-	dstPath := filepath.Join(uploadsDir, safeName) //склеивает компоненты пути
+	// 6 захват уникального имени
+	uniqueName := claimName(safeName)
+
+	dstPath := filepath.Join(uploadsDir, uniqueName) //склеивает компоненты пути
 	dst, err := os.Create(dstPath) //создает файл
 	if err != nil {
+		releaseName(uniqueName) // 6
 		return 0, 0, "", fmt.Errorf("create %s: %w", dstPath, err)
 	}
 	committed := false
 	defer func() {
-		dst.Close()
+		// 11 если файл не был закрыт явно, закрываем здесь
 		if !committed {
+			dst.Close()
 			_ = os.Remove(dstPath)
 		}
+		releaseName(uniqueName) // 6
 	}()
 
 	stats := &speedStats{sessionStart: time.Now()} 
@@ -73,12 +92,16 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, stri
 		if remaining := size - received; remaining < toRead { 
 			toRead = remaining
 		}
+		
+		// 10 тайм-аут на каждой итерации
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		
 		n, err := conn.Read(buf[:toRead]) //читает
 		if n > 0 {
 			if _, werr := dst.Write(buf[:n]); werr != nil {
 				close(stop)
 				<-reportDone
-				return received, size, safeName, fmt.Errorf("write: %w", werr)
+				return received, size, uniqueName, fmt.Errorf("write: %w", werr)
 			}
 			received += int64(n) // обновление счетчика принятых байт
 
@@ -100,9 +123,9 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, stri
 			close(stop)
 			<-reportDone
 			if errors.Is(err, io.EOF) {
-				return received, size, safeName, fmt.Errorf("unexpected EOF at %d/%d", received, size)
+				return received, size, uniqueName, fmt.Errorf("unexpected EOF at %d/%d", received, size)
 			}
-			return received, size, safeName, fmt.Errorf("read: %w", err)
+			return received, size, uniqueName, fmt.Errorf("read: %w", err)
 		}
 	}
 
@@ -110,10 +133,38 @@ func receiveFile(conn net.Conn, clientID, uploadsDir string) (int64, int64, stri
 	<-reportDone
 
 	if err := dst.Sync(); err != nil { //запись на диск
-		return received, size, safeName, fmt.Errorf("sync: %w", err)
+		return received, size, uniqueName, fmt.Errorf("sync: %w", err)
 	}
+
+	// 11: проверка успешности закрытия файла
+	if err := dst.Close(); err != nil {
+		return received, size, uniqueName, fmt.Errorf("close: %w", err)
+	}
+	
 	committed = true 
-	return received, size, safeName, nil
+	return received, size, uniqueName, nil
+}
+
+// 6 генерация уникального имени
+func claimName(name string) string {
+	namesMu.Lock()
+	defer namesMu.Unlock()
+
+	final := name
+	for i := 1; namesInUse[final]; i++ {
+		ext := filepath.Ext(name)
+		base := strings.TrimSuffix(name, ext)
+		final = fmt.Sprintf("%s_%d%s", base, i, ext)
+	}
+	namesInUse[final] = true
+	return final
+}
+
+// 6 освобождение имени
+func releaseName(name string) {
+	namesMu.Lock()
+	delete(namesInUse, name)
+	namesMu.Unlock()
 }
 
 //5 треб 
