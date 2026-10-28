@@ -12,3 +12,11 @@
 # ОС
 .DS_Store
 Thumbs.db
+
+# Лаба 2: игнорируем бинарники и большие тестовые файлы
+lab2/client/client
+lab2/server/server
+lab2/server/uploads/*.bin
+lab2/server/uploads/*.mp4
+lab2/server/uploads/*.pdf
+lab2/server/uploads/*.jpg
