@@ -39,6 +39,7 @@ func (c *Client) Run() error {
 	}
 
 	if err := readStatus(conn); err != nil {
+		// 15 просто возвращаем ошибку, чтобы сработали defer f.Close() и defer conn.Close()
 		return err
 	}
 
