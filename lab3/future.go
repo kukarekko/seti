@@ -64,6 +64,7 @@ func Then[T, U any](f *Future[T], fn func(T) (U, error)) *Future[U] {
 	return r
 }
 
+//Сделай А, когда А готово — сделай Б
 func ThenCompose[T, U any](f *Future[T], fn func(T) *Future[U]) *Future[U] {
 	r := newFuture[U]()
 	go func() {
@@ -78,7 +79,7 @@ func ThenCompose[T, U any](f *Future[T], fn func(T) *Future[U]) *Future[U] {
 	return r
 }
 
-//берёт два независимых Future и ждёт, пока оба закончат
+//берёт два независимых Future и ждёт, пока оба закончатся и склеивает результат
 func ThenCombine[A, B, R any](a *Future[A], b *Future[B], fn func(A, B) R) *Future[R] {
 	r := newFuture[R]()
 	go func() {

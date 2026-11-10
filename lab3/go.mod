@@ -1,3 +1,5 @@
 module places
 
-go 1.21
+go 1.27.3
+
+require github.com/andlabs/ui v0.0.0-20200610043537-70a69d6ae31e // indirect
