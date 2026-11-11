@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,11 +11,14 @@ import (
 	"github.com/andlabs/ui"
 )
 
+
+//модель таблицы
 type placesModel struct {
 	places []Place
 	images []*ui.Image
 }
 
+//типы колонок
 func (m *placesModel) ColumnTypes(*ui.TableModel) []ui.TableValue {
 	return []ui.TableValue{
 		ui.TableImage{},
@@ -24,8 +28,11 @@ func (m *placesModel) ColumnTypes(*ui.TableModel) []ui.TableValue {
 	}
 }
 
-func (m *placesModel) NumRows(*ui.TableModel) int { return len(m.places) }
+func (m *placesModel) NumRows(*ui.TableModel) int { 
+	return len(m.places) 
+}
 
+//значение ячейки
 func (m *placesModel) CellValue(_ *ui.TableModel, row, col int) ui.TableValue {
 	p := m.places[row]
 	switch col {
@@ -154,7 +161,7 @@ func runGUI(geoKey, owmKey string) {
 			resultLabel.SetText("Ищу локации...")
 
 			go func() {
-				locs, err := searchLocations(query, geoKey).Await()
+				locs, err := searchLocations(context.Background(), query, geoKey).Await()
 				ui.QueueMain(func() {
 					if id != searchID {
 						return

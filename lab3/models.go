@@ -7,7 +7,7 @@ import (
 
 type Location struct {
 	Name, Kind string
-	Lat, Lng   float64
+	Lat, Lng float64
 }
 
 func (l Location) String() string {
@@ -17,20 +17,20 @@ func (l Location) String() string {
 type Weather struct {
 	Description string
 	Temp, Feels float64
-	Humidity    int
-	Pressure    int
-	WindSpeed   float64
+	Humidity int
+	Pressure int
+	WindSpeed float64
 }
 
 type Place struct {
 	Name, Kinds, Description string
-	Dist                     float64
-	Lat, Lng                 float64
-	Image                    *image.RGBA
+	Dist float64
+	Lat, Lng float64
+	Image *image.RGBA
 }
 
 type Report struct {
 	Location Location
-	Weather  Weather
-	Places   []Place
+	Weather Weather
+	Places []Place
 }

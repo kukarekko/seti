@@ -4,11 +4,13 @@ import "fmt"
 
 type Future[T any] struct {
 	done chan struct{}
-	val  T
-	err  error
+	val T
+	err error
 }
 
-func newFuture[T any]() *Future[T] { return &Future[T]{done: make(chan struct{})} }
+func newFuture[T any]() *Future[T] { 
+	return &Future[T]{done: make(chan struct{})} 
+}
 
 func (f *Future[T]) complete(v T, err error) {
 	f.val, f.err = v, err
@@ -21,6 +23,7 @@ func (f *Future[T]) Await() (T, error) {
 	return f.val, f.err
 }
 
+//заглушка при ошибке
 func (f *Future[T]) orElse(fn func(error) T) *Future[T] {
 	r := newFuture[T]()
 	go func() {
@@ -33,11 +36,11 @@ func (f *Future[T]) orElse(fn func(error) T) *Future[T] {
 	return r
 }
 
-//создаёт пустой Future, запускает fn в отдельной горутине
+//запускает функцию в фоне(в отдельной горутине)
 func Async[T any](fn func() (T, error)) *Future[T] {
 	f := newFuture[T]()
 	go func() {
-		defer func() {
+		defer func() { 
 			if r := recover(); r != nil {
 				var zero T
 				f.complete(zero, fmt.Errorf("panic: %v", r))
@@ -49,7 +52,7 @@ func Async[T any](fn func() (T, error)) *Future[T] {
 	return f
 }
 
-//преобразовываем тип футур для результата
+//преобразовываем тип после получения результата
 func Then[T, U any](f *Future[T], fn func(T) (U, error)) *Future[U] { 
 	r := newFuture[U]()
 	go func() {
@@ -87,11 +90,11 @@ func ThenCombine[A, B, R any](a *Future[A], b *Future[B], fn func(A, B) R) *Futu
 		bv, berr := b.Await()
 		var zero R
 		switch {
-		case aerr != nil:
+		case aerr != nil: //ошибка а
 			r.complete(zero, aerr)
-		case berr != nil:
+		case berr != nil: //б
 			r.complete(zero, berr)
-		default:
+		default: //все норм
 			r.complete(fn(av, bv), nil)
 		}
 	}()
