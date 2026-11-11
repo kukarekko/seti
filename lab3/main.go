@@ -12,7 +12,5 @@ func main() {
 		fmt.Println("Задайте GEOAPIFY_KEY, OPENWEATHER_KEY")
 		os.Exit(1)
 	}
-
-	// Запускаем графический интерфейс
 	runGUI(geo, owm)
 }

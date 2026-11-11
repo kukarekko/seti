@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -24,7 +25,13 @@ func debugf(format string, args ...any) {
 // радиус
 const searchRadius = 1000
 
+//статья с координатами дальше этого расстояния (м) считается чужой
+const maxWikiDistance = 20000
+
 var bracketsRe = regexp.MustCompile(`\s*\[…\]|\s*\[\d+\]`) //для википедии
+
+//названия вида «Н.А. Борисову», «И.Н. Векуа»
+var initialsRe = regexp.MustCompile(`^[А-ЯЁA-Z]\.\s*[А-ЯЁA-Z]\.`)
 
 //чистка текста из википедии
 func cleanExtract(s string) string {
@@ -59,26 +66,29 @@ func stem(w string) string {
 	return w
 }
 
-//проверка что статья пересекается с искомым местом хоть по 1 слову
+//проверка что статья пересекается с искомым местом
+//(минимум 2 слова для длинных названий, 1 для коротких, чтобы не цеплять «Спортсменов»)
 func sameTopic(placeName, title string) bool {
-	a := strings.ToLower(placeName)
+	cleanName := initialsRe.ReplaceAllString(placeName, "")
+	a := strings.ToLower(cleanName)
 	b := strings.ToLower(title)
-	clean := func(s string) []string {
-		return strings.FieldsFunc(s, func(r rune) bool {
-			return !(r >= 'а' && r <= 'я' || r == 'ё' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
-		})
-	}
-	for _, w := range clean(a) {
+
+	words := strings.FieldsFunc(a, func(r rune) bool {
+		return !(r >= 'а' && r <= 'я' || r == 'ё' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	})
+
+	matches := 0
+	for _, w := range words {
 		if len([]rune(w)) >= 4 && strings.Contains(b, stem(w)) {
-			return true
+			matches++
 		}
 	}
-	for _, w := range clean(b) {
-		if len([]rune(w)) >= 4 && strings.Contains(a, stem(w)) {
-			return true
-		}
+
+	//для коротких названий хватит 1 слова, для длинных нужно 2
+	if len(words) <= 2 {
+		return matches >= 1
 	}
-	return false
+	return matches >= 2
 }
 
 //ссылка на картинку из википедии
@@ -90,20 +100,84 @@ func commonsURL(img string) string {
 	img = strings.TrimPrefix(img, "Файл:")
 	return "https://commons.wikimedia.org/wiki/Special:FilePath/" + url.PathEscape(img) + "?width=200"
 }
+//перевод типов мест на русский
+func translateKind(resultType, category string) string {
+	//сначала смотрим на категорию (она точнее)
+	if category != "" {
+		dict := map[string]string{
+			"public_transport.bus":      "остановка",
+			"public_transport.subway":   "метро",
+			"public_transport.train":    "станция",
+			"catering.cafe":             "кафе",
+			"catering.restaurant":       "ресторан",
+			"catering.fast_food":        "фастфуд",
+			"catering.bar":              "бар",
+			"commercial.supermarket":    "супермаркет",
+			"commercial.shopping_mall":  "торговый центр",
+			"commercial.marketplace":    "рынок",
+			"healthcare.pharmacy":       "аптека",
+			"healthcare.hospital":       "больница",
+			"healthcare.clinic":         "поликлиника",
+			"education.school":          "школа",
+			"education.university":      "университет",
+			"tourism.attraction":        "достопримечательность",
+			"tourism.sights":            "достопримечательность",
+			"tourism.museum":            "музей",
+			"tourism.hotel":             "отель",
+			"leisure.park":              "парк",
+			"amenity.theatre":           "театр",
+			"amenity.cinema":            "кинотеатр",
+			"amenity.place_of_worship":  "храм",
+			"amenity.bank":              "банк",
+			"amenity.atm":               "банкомат",
+			"amenity.fuel":              "заправка",
+			"amenity.parking":           "парковка",
+			"amenity.toilets":           "туалет",
+			"office.government":         "госучреждение",
+			"building.historic":         "историческое здание",
+		}
+		//ищем точное совпадение или частичное
+		for k, v := range dict {
+			if strings.Contains(category, k) {
+				return v
+			}
+		}
+	}
+
+	//если категория не подошла, смотрим на result_type
+	dict := map[string]string{
+		"amenity":         "объект",
+		"administrative":  "населенный пункт",
+		"populated_place": "населенный пункт",
+		"street":          "улица",
+		"city":            "город",
+		"town":            "город",
+		"village":         "деревня",
+		"country":         "страна",
+		"state":           "регион",
+		"attraction":      "достопримечательность",
+		"building":        "здание",
+		"postcode":        "индекс",
+	}
+	if rus, ok := dict[resultType]; ok {
+		return rus
+	}
+	return resultType
+}
 
 //поиск места
 func searchLocations(ctx context.Context, query, key string) *Future[[]Location] {
-	q := url.Values{"text": {query}, "limit": {"5"}, "lang": {"ru"}, "apiKey": {key}}
+	q := url.Values{"text": {query}, "limit": {"20"}, "lang": {"ru"}, "apiKey": {key}}
 	f := getJSON[struct {
 		Features []struct {
 			Properties struct {
-				Name string  `json:"name"`
-				Address string  `json:"address_line1"`
-				City string  `json:"city"`
+				Name       string  `json:"name"`
+				Address    string  `json:"address_line1"`
+				City       string  `json:"city"`
 				ResultType string  `json:"result_type"`
-				Category string  `json:"category"`
-				Lat float64 `json:"lat"`
-				Lon float64 `json:"lon"`
+				Category   string  `json:"category"`
+				Lat        float64 `json:"lat"`
+				Lon        float64 `json:"lon"`
 			} `json:"properties"`
 		} `json:"features"`
 	}](ctx, "https://api.geoapify.com/v1/geocode/search?"+q.Encode())
@@ -111,13 +185,13 @@ func searchLocations(ctx context.Context, query, key string) *Future[[]Location]
 	return Then(f, func(r struct {
 		Features []struct {
 			Properties struct {
-				Name string  `json:"name"`
-				Address string  `json:"address_line1"`
-				City string  `json:"city"`
+				Name       string  `json:"name"`
+				Address    string  `json:"address_line1"`
+				City       string  `json:"city"`
 				ResultType string  `json:"result_type"`
-				Category string  `json:"category"`
-				Lat float64 `json:"lat"`
-				Lon float64 `json:"lon"`
+				Category   string  `json:"category"`
+				Lat        float64 `json:"lat"`
+				Lon        float64 `json:"lon"`
 			} `json:"properties"`
 		} `json:"features"`
 	}) ([]Location, error) {
@@ -132,15 +206,13 @@ func searchLocations(ctx context.Context, query, key string) *Future[[]Location]
 			if p.City != "" && p.City != name {
 				parts = append(parts, p.City)
 			}
-			kind := p.Category
-			if kind == "" {
-				kind = p.ResultType
-			}
+			//переводим тип на русский (сначала по категории, потом по result_type)
+			rusKind := translateKind(p.ResultType, p.Category)
 			res = append(res, Location{
 				Name: strings.Join(parts, ", "),
-				Kind: kind,
-				Lat: p.Lat,
-				Lng: p.Lon,
+				Kind: rusKind,
+				Lat:  p.Lat,
+				Lng:  p.Lon,
 			})
 		}
 		if len(res) == 0 {
@@ -158,10 +230,10 @@ func fetchWeather(ctx context.Context, l Location, key string) *Future[Weather] 
 			Description string `json:"description"`
 		} `json:"weather"`
 		Main struct {
-			Temp float64 `json:"temp"`
+			Temp      float64 `json:"temp"`
 			FeelsLike float64 `json:"feels_like"`
-			Humidity  int `json:"humidity"`
-			Pressure  int `json:"pressure"`
+			Humidity  int     `json:"humidity"`
+			Pressure  int     `json:"pressure"`
 		} `json:"main"`
 		Wind struct {
 			Speed float64 `json:"speed"`
@@ -173,10 +245,10 @@ func fetchWeather(ctx context.Context, l Location, key string) *Future[Weather] 
 			Description string `json:"description"`
 		} `json:"weather"`
 		Main struct {
-			Temp float64 `json:"temp"`
+			Temp      float64 `json:"temp"`
 			FeelsLike float64 `json:"feels_like"`
-			Humidity  int `json:"humidity"`
-			Pressure  int `json:"pressure"`
+			Humidity  int     `json:"humidity"`
+			Pressure  int     `json:"pressure"`
 		} `json:"main"`
 		Wind struct {
 			Speed float64 `json:"speed"`
@@ -191,17 +263,22 @@ func fetchWeather(ctx context.Context, l Location, key string) *Future[Weather] 
 }
 
 type geoPlace struct {
-	PlaceId string   `json:"place_id"`
-	Name string   `json:"name"`
-	Distance float64  `json:"distance"`
+	PlaceId    string   `json:"place_id"`
+	Name       string   `json:"name"`
+	Distance   float64  `json:"distance"`
 	Categories []string `json:"categories"`
-	Lat float64  `json:"lat"`
-	Lon float64  `json:"lon"`
+	Lat        float64  `json:"lat"`
+	Lon        float64  `json:"lon"`
 }
 
-//поиск мест интересных
+//поиск мест интересных: только крупные объекты (университеты, музеи, парки, исторические здания)
 func fetchPlaceList(ctx context.Context, l Location, key string) *Future[[]geoPlace] {
-	q := url.Values{"categories": {"tourism.sights"}, "filter": {fmt.Sprintf("circle:%f,%f,%d", l.Lng, l.Lat, searchRadius)}, "limit": {"10"}, "apiKey": {key}}
+	q := url.Values{
+		"categories": {"education.university,entertainment.museum,leisure.park,building.historic"},
+		"filter":     {fmt.Sprintf("circle:%f,%f,%d", l.Lng, l.Lat, searchRadius)},
+		"limit":      {"20"},
+		"apiKey":     {key},
+	}
 	f := getJSON[struct {
 		Features []struct {
 			Properties geoPlace `json:"properties"`
@@ -215,9 +292,18 @@ func fetchPlaceList(ctx context.Context, l Location, key string) *Future[[]geoPl
 	}) ([]geoPlace, error) {
 		var out []geoPlace
 		for _, f := range r.Features {
-			if f.Properties.Name != "" {
+			//берем только те, у кого есть нормальное название (без инициалов)
+			if f.Properties.Name != "" && !initialsRe.MatchString(f.Properties.Name) {
 				out = append(out, f.Properties)
 			}
+		}
+		//сортируем по расстоянию
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].Distance < out[j].Distance
+		})
+		//оставляем 10
+		if len(out) > 10 {
+			out = out[:10]
 		}
 		return out, nil
 	})
@@ -227,7 +313,7 @@ func fetchPlaceList(ctx context.Context, l Location, key string) *Future[[]geoPl
 type wikiInfo struct {
 	Extract  string
 	Thumb    string
-	IsPerson bool 
+	IsPerson bool
 }
 
 //определяет, что статья в википедии о человеке а не о месте
@@ -258,24 +344,22 @@ type wikiInfoResp struct {
 //описание и фото из википедии
 func fetchWikiInfo(ctx context.Context, title string) *Future[wikiInfo] {
 	q := url.Values{
-		"action": {"query"},
-		"format": {"json"},
-		"titles": {title},
-		"redirects": {"1"},
-		"prop": {"extracts|pageimages|categories"},
-		"cllimit": {"max"},
-		"exintro": {"1"},
+		"action":      {"query"},
+		"format":      {"json"},
+		"titles":      {title},
+		"redirects":   {"1"},
+		"prop":        {"extracts|pageimages|categories"},
+		"cllimit":     {"max"},
+		"exintro":     {"1"},
 		"explaintext": {"1"},
 		"exsentences": {"3"},
-		"piprop": {"thumbnail"},
+		"piprop":      {"thumbnail"},
 		"pithumbsize": {"200"},
 	}
 	u := "https://ru.wikipedia.org/w/api.php?" + q.Encode()
-	debugf("запрос Википедии: %s", u)
 
 	return Then(getJSON[wikiInfoResp](ctx, u), func(r wikiInfoResp) (wikiInfo, error) {
 		for _, p := range r.Query.Pages {
-			debugf("Вики ответ: extract=%d симв., thumb=%q", len(p.Extract), p.Thumbnail.Source)
 			cats := make([]string, len(p.Categories))
 			for i, c := range p.Categories {
 				cats[i] = c.Title
@@ -286,10 +370,8 @@ func fetchWikiInfo(ctx context.Context, title string) *Future[wikiInfo] {
 				IsPerson: isPersonCategories(cats),
 			}, nil
 		}
-		debugf("Вики: pages пустой")
 		return wikiInfo{}, nil
 	}).orElse(func(err error) wikiInfo {
-		debugf("Ошибка Википедии: %v", err)
 		return wikiInfo{}
 	})
 }
@@ -302,7 +384,7 @@ type wikiGeoResp struct {
 	} `json:"query"`
 }
 
-//статья по координатам 
+//статья по координатам
 func fetchRuTitleByCoords(ctx context.Context, lat, lng float64) *Future[string] {
 	q := url.Values{
 		"action":   {"query"},
@@ -330,19 +412,21 @@ type wikiSearchResp struct {
 	} `json:"query"`
 }
 
-//статья по названию
+//статья по названию: ищем 10 кандидатов и берем первого, который подходит по названию
 func fetchRuTitleByName(ctx context.Context, name string) *Future[string] {
 	q := url.Values{
 		"action":   {"query"},
 		"format":   {"json"},
 		"list":     {"search"},
 		"srsearch": {name},
-		"srlimit":  {"1"},
+		"srlimit":  {"10"},
 	}
 	u := "https://ru.wikipedia.org/w/api.php?" + q.Encode()
 	return Then(getJSON[wikiSearchResp](ctx, u), func(r wikiSearchResp) (string, error) {
-		if len(r.Query.Search) > 0 {
-			return r.Query.Search[0].Title, nil
+		for _, s := range r.Query.Search {
+			if sameTopic(name, s.Title) {
+				return s.Title, nil
+			}
 		}
 		return "", nil
 	}).orElse(func(error) string { return "" })
@@ -378,6 +462,39 @@ type placeDetailsResp struct {
 			} `json:"wiki_and_media"`
 		} `json:"properties"`
 	} `json:"features"`
+}
+
+//координаты статьи из википедии
+type wikiCoordsResp struct {
+	Query struct {
+		Pages map[string]struct {
+			Coordinates []struct {
+				Lat float64 `json:"lat"`
+				Lon float64 `json:"lon"`
+			} `json:"coordinates"`
+		} `json:"pages"`
+	} `json:"query"`
+}
+
+//получаем координаты статьи чтобы проверить что она про это место
+func fetchWikiCoords(ctx context.Context, title string) *Future[[]float64] {
+	q := url.Values{
+		"action":    {"query"},
+		"format":    {"json"},
+		"titles":    {title},
+		"prop":      {"coordinates"},
+		"redirects": {"1"},
+	}
+	u := "https://ru.wikipedia.org/w/api.php?" + q.Encode()
+
+	return Then(getJSON[wikiCoordsResp](ctx, u), func(r wikiCoordsResp) ([]float64, error) {
+		for _, p := range r.Query.Pages {
+			if len(p.Coordinates) > 0 {
+				return []float64{p.Coordinates[0].Lat, p.Coordinates[0].Lon}, nil
+			}
+		}
+		return nil, nil
+	}).orElse(func(error) []float64 { return nil })
 }
 
 //собирает все в одно место
@@ -421,7 +538,6 @@ func fetchPlace(ctx context.Context, p geoPlace, key string, centerLat, centerLn
 		}
 		return Async(func() (string, error) { return "", nil })
 	}).orElse(func(err error) string {
-		debugf("[%s] Ошибка Geoapify: %v", p.Name, err)
 		return ""
 	})
 
@@ -430,7 +546,6 @@ func fetchPlace(ctx context.Context, p geoPlace, key string, centerLat, centerLn
 			return Async(func() (string, error) { return t, nil })
 		}
 		return ThenCompose(fetchRuTitleByName(ctx, p.Name), func(found string) *Future[string] {
-			debugf("[%s] Поиск по имени: %q (совпадает: %v)", p.Name, found, sameTopic(p.Name, found))
 			if found != "" && sameTopic(p.Name, found) {
 				return Async(func() (string, error) { return found, nil })
 			}
@@ -438,7 +553,6 @@ func fetchPlace(ctx context.Context, p geoPlace, key string, centerLat, centerLn
 				return Async(func() (string, error) { return "", nil })
 			}
 			return Then(fetchRuTitleByCoords(ctx, p.Lat, p.Lon), func(c string) (string, error) {
-				debugf("[%s] Поиск по координатам: %q (совпадает: %v)", p.Name, c, sameTopic(p.Name, c))
 				if sameTopic(p.Name, c) {
 					return c, nil
 				}
@@ -448,38 +562,41 @@ func fetchPlace(ctx context.Context, p geoPlace, key string, centerLat, centerLn
 	})
 
 	return ThenCompose(title2, func(t string) *Future[Place] {
-		info := Async(func() (wikiInfo, error) { return wikiInfo{}, nil })
-		if t != "" {
-			info = fetchWikiInfo(ctx, t)
+		if t == "" {
+			return ready(wikiInfo{}, nil)
 		}
-		return ThenCompose(info, func(wi wikiInfo) *Future[Place] {
-			debugf("[%s] Вики: thumb=%q, extract_len=%d", p.Name, wi.Thumb, len(wi.Extract))
 
-			thumb := wi.Thumb
-			if wi.IsPerson {
-				// Мемориал посвящён человеку: статья и портрет относятся к нему,
-				// а не к месту. Портрет не берём, ищем фото самого места.
-				debugf("[%s] Статья о человеке, портрет пропущен", p.Name)
-				thumb = ""
+		// Проверяем координаты статьи
+		return ThenCompose(fetchWikiCoords(ctx, t), func(coords []float64) *Future[Place] {
+			if len(coords) == 2 {
+				distToArticle := distanceMeters(p.Lat, p.Lon, coords[0], coords[1])
+				// Если статья дальше 20 км — это не то место!
+				if distToArticle > maxWikiDistance {
+					return ready(wikiInfo{}, nil)
+				}
 			}
-			if thumb == "" && geoImage != "" {
-				thumb = commonsURL(geoImage)
-				debugf("[%s] Использую картинку Geoapify: %q", p.Name, thumb)
-			}
-			if thumb == "" {
-				debugf("[%s] Фото нет", p.Name)
-				return ready(wi, nil)
-			}
-			return Then(getImage(ctx, thumb, 120, 90), func(img *image.RGBA) (Place, error) {
-				debugf("[%s] Фото загружено: %dx%d", p.Name, img.Bounds().Dx(), img.Bounds().Dy())
-				return finish(wi, img), nil
-			}).orElse(func(err error) Place {
-				debugf("[%s] Ошибка загрузки фото: %v", p.Name, err)
-				return finish(wi, nil)
+
+			info := fetchWikiInfo(ctx, t)
+			return ThenCompose(info, func(wi wikiInfo) *Future[Place] {
+				//если статья про человека — не берем ни описание, ни портрет
+				if wi.IsPerson {
+					wi = wikiInfo{}
+				}
+				thumb := wi.Thumb
+				if thumb == "" && geoImage != "" {
+					thumb = commonsURL(geoImage)
+				}
+				if thumb == "" {
+					return ready(wi, nil)
+				}
+				return Then(getImage(ctx, thumb, 120, 90), func(img *image.RGBA) (Place, error) {
+					return finish(wi, img), nil
+				}).orElse(func(err error) Place {
+					return finish(wi, nil)
+				})
 			})
 		})
 	}).orElse(func(err error) Place {
-		debugf("[%s] Общая ошибка: %v", p.Name, err)
 		return finish(wikiInfo{}, nil)
 	})
 }
@@ -555,7 +672,7 @@ func shorten(s string, maxRunes int) string {
 	return string(cut) + "…"
 }
 
-//перенос по сторокам 
+//перенос по сторокам
 func wrapText(s string, width int, indent string) string {
 	var sb strings.Builder
 	lineLen := 0

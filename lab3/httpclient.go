@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	userAgent = "PlacesApp/1.0 (учебный проект)" //заголовок
-	maxBodySize = 5 << 20 // макс 5 МБ на один ответ
-	maxParallelRequests = 6 // одновременно в сети не больше 6 запросов
+	userAgent = "PlacesApp/1.0 (https://github.com/kukarekko/places; polyavor@gmail.com)"
+	maxBodySize = 5 << 20
+	maxParallelRequests = 6
 	requestTimeout = 15 * time.Second
 )
 
