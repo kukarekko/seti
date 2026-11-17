@@ -285,7 +285,8 @@ func fetchPlaceList(ctx context.Context, l Location, key string) *Future[[]geoPl
 		} `json:"features"`
 	}](ctx, "https://api.geoapify.com/v2/places?"+q.Encode())
 
-	res := Then(f, func(r struct {
+	//ошибки не глушим через orElse, чтобы ui показал реальную причину
+	return Then(f, func(r struct {
 		Features []struct {
 			Properties geoPlace `json:"properties"`
 		} `json:"features"`
@@ -307,7 +308,6 @@ func fetchPlaceList(ctx context.Context, l Location, key string) *Future[[]geoPl
 		}
 		return out, nil
 	})
-	return res.orElse(func(error) []geoPlace { return []geoPlace{} })
 }
 
 type wikiInfo struct {

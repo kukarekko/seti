@@ -11,7 +11,6 @@ import (
 	"github.com/andlabs/ui"
 )
 
-
 //модель таблицы
 type placesModel struct {
 	places []Place
@@ -28,8 +27,8 @@ func (m *placesModel) ColumnTypes(*ui.TableModel) []ui.TableValue {
 	}
 }
 
-func (m *placesModel) NumRows(*ui.TableModel) int { 
-	return len(m.places) 
+func (m *placesModel) NumRows(*ui.TableModel) int {
+	return len(m.places)
 }
 
 //значение ячейки
@@ -66,9 +65,10 @@ func runGUI(geoKey, owmKey string) {
 		comboHolder := ui.NewVerticalBox()
 		var foundLocs []Location
 		var searchID, loadID int
+		var cancelSearch, cancelReport context.CancelFunc //для отмены зависших или старых запросов
 		var hasCombo bool
 
-		// Заглушка для картинок (светло-серая)
+		//заглушка для картинок (светло-серая)
 		placeholder := ui.NewImage(120, 90)
 		gray := image.NewRGBA(image.Rect(0, 0, 120, 90))
 		draw.Draw(gray, gray.Bounds(), &image.Uniform{color.RGBA{238, 238, 238, 255}}, image.Point{}, draw.Src)
@@ -102,15 +102,23 @@ func runGUI(geoKey, owmKey string) {
 		}
 
 		showReport := func(loc Location) {
+			//если прошлый отчет еще грузится — отменяем
+			if cancelReport != nil {
+				cancelReport()
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancelReport = cancel
+
 			loadID++
 			id := loadID
 			resultLabel.SetText("Загружаю погоду и места...")
 			clearPlaces()
 
-			go func() {
-				report, err := loadReport(loc, owmKey, geoKey).Await()
+			//вешаем коллбэк вместо отдельной горутины с Await
+			loadReport(ctx, loc, owmKey, geoKey).onComplete(func(report Report, err error) {
 				ui.QueueMain(func() {
-					if id != loadID {
+					//игнорим если уже запустили другой отчет или новый поиск
+					if id != loadID || ctx.Err() != nil {
 						return
 					}
 					if err != nil {
@@ -136,7 +144,7 @@ func runGUI(geoKey, owmKey string) {
 						addPlace(p)
 					}
 				})
-			}()
+			})
 		}
 
 		box := ui.NewVerticalBox()
@@ -156,14 +164,27 @@ func runGUI(geoKey, owmKey string) {
 				return
 			}
 
+			//рубим старый поиск и загрузку отчета чтобы не вылезли позже
+			if cancelSearch != nil {
+				cancelSearch()
+			}
+			if cancelReport != nil {
+				cancelReport()
+				cancelReport = nil
+			}
+			loadID++
+			clearPlaces()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancelSearch = cancel
+
 			searchID++
 			id := searchID
 			resultLabel.SetText("Ищу локации...")
 
-			go func() {
-				locs, err := searchLocations(context.Background(), query, geoKey).Await()
+			searchLocations(ctx, query, geoKey).onComplete(func(locs []Location, err error) {
 				ui.QueueMain(func() {
-					if id != searchID {
+					if id != searchID || ctx.Err() != nil {
 						return
 					}
 					if hasCombo {
@@ -198,10 +219,17 @@ func runGUI(geoKey, owmKey string) {
 					hasCombo = true
 					resultLabel.SetText("Выберите локацию из списка ниже:")
 				})
-			}()
+			})
 		})
 
 		window.OnClosing(func(*ui.Window) bool {
+			//отменяем активные запросы при закрытии окна
+			if cancelSearch != nil {
+				cancelSearch()
+			}
+			if cancelReport != nil {
+				cancelReport()
+			}
 			ui.Quit()
 			return true
 		})
