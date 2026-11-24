@@ -1,7 +1,7 @@
 package main
 
 //фиксированный размер буфера на одно направление (чтобы не жрать память)
-const bufSize = 32 * 1024
+const bufSize = 32 * 1024 //8 требование
 
 type Buffer struct {
 	data [bufSize]byte
@@ -9,10 +9,14 @@ type Buffer struct {
 }
 
 //сколько байт сейчас лежит в буфере
-func (b *Buffer) Len() int { return b.w - b.r }
+func (b *Buffer) Len() int {
+	return b.w - b.r
+}
 
 //сколько места осталось для записи
-func (b *Buffer) Avail() int { return len(b.data) - b.w }
+func (b *Buffer) Avail() int {
+	return len(b.data) - b.w
+}
 
 //пишем данные в буфер, при необходимости сдвигаем непрочитанный хвост в начало
 func (b *Buffer) Write(p []byte) int {

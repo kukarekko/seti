@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -14,23 +15,25 @@ const connectTimeout = 10 * time.Second
 
 type ProxyServer struct {
 	listenFD int
-	dns      *DNSResolver
+	dns *DNSResolver
 	sessions map[int]*Session //поиск сессии по clientFD или upstreamFD
-	epoch    uint64           //счетчик итераций цикла (чтобы не аллоцировать map на каждом шаге)
+	epoch uint64 //счетчик итераций цикла (чтобы не аллоцировать map на каждом шаге)
 }
 
 //поднимаем неблокирующий слушающий сокет и DNS-резолвер
-func newProxyServer(port int) (*ProxyServer, error) {
+func newProxyServer(port int, customDNSIP net.IP, customDNSPort int) (*ProxyServer, error) {
+	//создаем слушающий тсп-сокет
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, unix.IPPROTO_TCP)
 	if err != nil {
 		return nil, err
 	}
 	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
-	if err := unix.SetNonblock(fd, true); err != nil {
+	if err := unix.SetNonblock(fd, true); err != nil { //флаг для не блокировки потока (5 требование)
 		unix.Close(fd)
 		return nil, err
 	}
 
+	//привязываем сокет к 0.0.0.0:<port> и переводим в режим прослушивания (2 требование)
 	sa := &unix.SockaddrInet4{Port: port}
 	if err := unix.Bind(fd, sa); err != nil {
 		unix.Close(fd)
@@ -41,7 +44,7 @@ func newProxyServer(port int) (*ProxyServer, error) {
 		return nil, err
 	}
 
-	dns, err := newDNSResolver()
+	dns, err := newDNSResolver(customDNSIP, customDNSPort) //10 требование
 	if err != nil {
 		unix.Close(fd)
 		return nil, err
@@ -49,12 +52,12 @@ func newProxyServer(port int) (*ProxyServer, error) {
 
 	return &ProxyServer{
 		listenFD: fd,
-		dns:      dns,
+		dns: dns,
 		sessions: make(map[int]*Session),
 	}, nil
 }
 
-//главный цикл событий на системном Poll
+//главный цикл событий на системном Poll (9 требование)
 func (s *ProxyServer) Run() {
 	var pfds []unix.PollFd
 
@@ -62,14 +65,14 @@ func (s *ProxyServer) Run() {
 		s.epoch++
 		pfds = pfds[:0]
 
-		//слушающий сокет и DNS всегда слушаем на чтение
+		//Слушающий сокет и DNS-сокет добавляем всегда с флагом POLLIN (10 требование)
 		pfds = append(pfds, unix.PollFd{Fd: int32(s.listenFD), Events: unix.POLLIN})
 		pfds = append(pfds, unix.PollFd{Fd: int32(s.dns.fd), Events: unix.POLLIN})
 
 		hasActiveTimers := len(s.dns.pending) > 0
 
 		//добавляем клиентские и серверные сокеты только если реально есть что читать/писать
-		//(иначе будут холостые просыпания Poll)
+		//(иначе будут холостые просыпания Poll) 7 требование
 		for _, sess := range s.sessions {
 			if sess.lastEpoch == s.epoch {
 				continue
@@ -90,7 +93,7 @@ func (s *ProxyServer) Run() {
 				if sess.u2c.Len() > 0 {
 					cEvents |= unix.POLLOUT
 				}
-			case StateForwarding:
+			case StateForwarding: //6 дуплекс требование прокси->клиенту
 				//читаем только если есть место в буфере (backpressure)
 				if !sess.clientEOF && sess.c2u.Avail() > 0 {
 					cEvents |= unix.POLLIN
@@ -108,7 +111,7 @@ func (s *ProxyServer) Run() {
 				switch sess.state {
 				case StateUpstreamConnecting:
 					uEvents |= unix.POLLOUT //неблокирующий connect сигналит через POLLOUT
-				case StateForwarding:
+				case StateForwarding: //6 требование клиент->прокси
 					if !sess.upstreamEOF && sess.u2c.Avail() > 0 {
 						uEvents |= unix.POLLIN
 					}
@@ -122,13 +125,14 @@ func (s *ProxyServer) Run() {
 			}
 		}
 
-		//если нет активных таймеров — спим бесконечно до первого события
+		//7 требование
+		//если нет активных таймеров, спим бесконечно до первого события 
 		timeoutMs := -1
 		if hasActiveTimers {
-			timeoutMs = 500
+			timeoutMs = 200
 		}
 
-		n, err := unix.Poll(pfds, timeoutMs)
+		n, err := unix.Poll(pfds, timeoutMs) //единственный блокирующий вызов 5 требование
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
 				continue
@@ -147,15 +151,16 @@ func (s *ProxyServer) Run() {
 
 		for i := range pfds {
 			pfd := &pfds[i]
-			if pfd.Revents == 0 {
+			if pfd.Revents == 0 { //ничего не произошло
 				continue
 			}
 			fd := int(pfd.Fd)
 
+			//выбираем нужный обработчик
 			if fd == s.listenFD {
 				s.handleAccept()
 			} else if fd == s.dns.fd {
-				s.handleDNSRead()
+				s.handleDNSRead() //10 требование
 			} else if sess, ok := s.sessions[fd]; ok {
 				if fd == sess.clientFD {
 					s.handleClientEvent(sess, pfd.Revents)
@@ -177,30 +182,30 @@ func (s *ProxyServer) handleAccept() {
 			}
 			return
 		}
-		if err := unix.SetNonblock(nfd, true); err != nil {
+		if err := unix.SetNonblock(nfd, true); err != nil { //5 требование
 			unix.Close(nfd)
 			continue
 		}
 		sess := &Session{
-			clientFD:   nfd,
+			clientFD: nfd,
 			upstreamFD: -1,
-			state:      StateGreetingRead,
+			state: StateGreetingRead,
 		}
 		s.sessions[nfd] = sess
 	}
 }
 
-//читаем готовые DNS-ответы из UDP-сокета
+//читаем готовые DNS-ответы из UDP-сокета (10 требование)
 func (s *ProxyServer) handleDNSRead() {
 	for {
-		n, _, err := unix.Recvfrom(s.dns.fd, s.dns.recvBuf[:], 0)
+		n, _, err := unix.Recvfrom(s.dns.fd, s.dns.recvBuf[:], 0) //Читает одну входящую UDP-датаграмму в заранее выделенный массив
 		if err != nil {
 			if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
 				fmt.Fprintf(os.Stderr, "DNS recv error: %v\n", err)
 			}
 			return
 		}
-		id, ip, parseErr := parseDNSResponse(s.dns.recvBuf[:n])
+		id, ip, parseErr := parseDNSResponse(s.dns.recvBuf[:n]) //парсинг ответа
 		sess, exists := s.dns.pending[id]
 		if !exists {
 			continue //чужой или уже протухший ответ
@@ -216,19 +221,30 @@ func (s *ProxyServer) handleDNSRead() {
 	}
 }
 
-//чистим зависшие DNS-запросы и долгие попытки подключения
+//чистим зависшие DNS-запросы (до 3 попыток, 10 требование) и долгие попытки подключения
 func (s *ProxyServer) checkTimeouts() {
 	now := time.Now()
 
-	for id, sess := range s.dns.pending {
+	var timedOutDNS []*Session
+	for _, sess := range s.dns.pending { //проверка зависших
 		if now.Sub(sess.dnsSentAt) > dnsQueryTimeout {
-			delete(s.dns.pending, id)
-			sess.dnsID = 0
+			timedOutDNS = append(timedOutDNS, sess)
+		}
+	}
+
+	for _, sess := range timedOutDNS {
+		if sess.dnsAttempts < dnsMaxAttempts { //повторяем
+			if err := s.dns.sendAttempt(sess); err != nil {
+				s.dns.Cancel(sess)
+				s.sendReplyAndClose(sess, repHostUnreach)
+			}
+		} else {
+			s.dns.Cancel(sess)
 			s.sendReplyAndClose(sess, repHostUnreach)
 		}
 	}
 
-	for _, sess := range s.sessions {
+	for _, sess := range s.sessions { //долгие подключения
 		if sess.state == StateUpstreamConnecting && now.Sub(sess.connectAt) > connectTimeout {
 			delete(s.sessions, sess.upstreamFD)
 			unix.Close(sess.upstreamFD)
@@ -245,11 +261,11 @@ func (s *ProxyServer) handleClientEvent(sess *Session, revents int16) {
 		return
 	}
 
-	if revents&(unix.POLLIN|unix.POLLHUP) != 0 {
+	if revents&(unix.POLLIN|unix.POLLHUP) != 0 { //чтение входных данных от клиента
 		var tmp [bufSize]byte
 		avail := sess.c2u.Avail()
 		if avail > 0 {
-			n, err := unix.Read(sess.clientFD, tmp[:avail])
+			n, err := unix.Read(sess.clientFD, tmp[:avail]) //6 требование
 			if n > 0 {
 				sess.c2u.Write(tmp[:n])
 			} else if n == 0 || (revents&unix.POLLHUP != 0 && (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK))) {
@@ -262,14 +278,14 @@ func (s *ProxyServer) handleClientEvent(sess *Session, revents int16) {
 	}
 
 	switch sess.state {
-	case StateGreetingRead:
+	case StateGreetingRead: //ждем приветствие от SOCKS5
 		if sess.clientEOF && sess.c2u.Len() == 0 {
 			s.closeSession(sess)
 			return
 		}
 		s.processGreeting(sess)
 
-	case StateGreetingWrite:
+	case StateGreetingWrite: //отправляем ответ
 		if revents&unix.POLLOUT != 0 && sess.u2c.Len() > 0 {
 			n, err := unix.Write(sess.clientFD, sess.u2c.Bytes())
 			if n > 0 {
@@ -288,14 +304,14 @@ func (s *ProxyServer) handleClientEvent(sess *Session, revents int16) {
 			s.processRequest(sess) //вдруг клиент уже прислал запрос вместе с приветствием
 		}
 
-	case StateRequestRead:
+	case StateRequestRead: //ждем команду коннект и адрес
 		if sess.clientEOF && sess.c2u.Len() == 0 {
 			s.closeSession(sess)
 			return
 		}
 		s.processRequest(sess)
 
-	case StateReplyWrite:
+	case StateReplyWrite: //отправляем клиенту итог подключения
 		if revents&unix.POLLOUT != 0 && sess.u2c.Len() > 0 {
 			n, err := unix.Write(sess.clientFD, sess.u2c.Bytes())
 			if n > 0 {
@@ -313,7 +329,7 @@ func (s *ProxyServer) handleClientEvent(sess *Session, revents int16) {
 			sess.state = StateForwarding
 		}
 
-	case StateForwarding:
+	case StateForwarding: //пересылка данных от сайта браузеру (6 требование)
 		if revents&unix.POLLOUT != 0 && sess.u2c.Len() > 0 {
 			n, err := unix.Write(sess.clientFD, sess.u2c.Bytes())
 			if n > 0 {
@@ -333,7 +349,7 @@ func (s *ProxyServer) processGreeting(sess *Session) {
 	if len(data) < 2 {
 		return
 	}
-	if data[0] != socksVersion5 {
+	if data[0] != socksVersion5 { //1 требование
 		s.closeSession(sess)
 		return
 	}
@@ -343,21 +359,21 @@ func (s *ProxyServer) processGreeting(sess *Session) {
 	}
 
 	hasNoAuth := false
-	for i := 0; i < nMethods; i++ {
+	for i := 0; i < nMethods; i++ { //ищет вход без пароля
 		if data[2+i] == authNoAuth {
 			hasNoAuth = true
 			break
 		}
 	}
-	sess.c2u.Consume(2 + nMethods)
+	sess.c2u.Consume(2 + nMethods) //очищает буфер
 
-	if !hasNoAuth {
+	if !hasNoAuth { //4 требование
 		sess.u2c.Write([]byte{socksVersion5, authNoAccept})
 		sess.state = StateReplyWrite
 		return
 	}
 
-	sess.u2c.Write([]byte{socksVersion5, authNoAuth})
+	sess.u2c.Write([]byte{socksVersion5, authNoAuth}) //ответ
 	sess.state = StateGreetingWrite
 }
 
@@ -367,7 +383,7 @@ func (s *ProxyServer) processRequest(sess *Session) {
 	if len(data) < 4 {
 		return
 	}
-	if data[0] != socksVersion5 {
+	if data[0] != socksVersion5 { //1 требование
 		s.closeSession(sess)
 		return
 	}
@@ -379,7 +395,7 @@ func (s *ProxyServer) processRequest(sess *Session) {
 	var domain string
 
 	switch atyp {
-	case atypIPv4:
+	case atypIPv4: //1 требование
 		reqLen = 4 + 4 + 2
 		if len(data) < reqLen {
 			return
@@ -387,7 +403,7 @@ func (s *ProxyServer) processRequest(sess *Session) {
 		copy(ipv4[:], data[4:8])
 		sess.targetPort = binary.BigEndian.Uint16(data[8:10])
 
-	case atypDomainName:
+	case atypDomainName: //10 требование
 		if len(data) < 5 {
 			return
 		}
@@ -399,23 +415,19 @@ func (s *ProxyServer) processRequest(sess *Session) {
 		domain = string(data[5 : 5+dLen])
 		sess.targetPort = binary.BigEndian.Uint16(data[5+dLen : reqLen])
 
-	case atypIPv6:
-		s.sendReplyAndClose(sess, repAtypNotSupp) //IPv6 по условию не поддерживаем
-		return
-
-	default:
+	default: //4 требование
 		s.sendReplyAndClose(sess, repAtypNotSupp)
 		return
 	}
 
 	sess.c2u.Consume(reqLen)
 
-	if cmd != cmdConnect {
+	if cmd != cmdConnect { //3 требование
 		s.sendReplyAndClose(sess, repCmdNotSupp) //поддерживаем только CONNECT (0x01)
 		return
 	}
 
-	if atyp == atypIPv4 {
+	if atyp == atypIPv4 { //10 требование
 		s.startUpstreamConnect(sess, ipv4)
 	} else {
 		sess.state = StateDNSResolving
@@ -427,12 +439,12 @@ func (s *ProxyServer) processRequest(sess *Session) {
 
 //запускаем неблокирующее подключение к целевому серверу
 func (s *ProxyServer) startUpstreamConnect(sess *Session, ip [4]byte) {
-	ufd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, unix.IPPROTO_TCP)
+	ufd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, unix.IPPROTO_TCP) //неблокирующий тсп сокет
 	if err != nil {
 		s.sendReplyAndClose(sess, repGeneralFail)
 		return
 	}
-	if err := unix.SetNonblock(ufd, true); err != nil {
+	if err := unix.SetNonblock(ufd, true); err != nil { //5 требование
 		unix.Close(ufd)
 		s.sendReplyAndClose(sess, repGeneralFail)
 		return
@@ -443,7 +455,7 @@ func (s *ProxyServer) startUpstreamConnect(sess *Session, ip [4]byte) {
 		Addr: ip,
 	}
 
-	err = unix.Connect(ufd, sa)
+	err = unix.Connect(ufd, sa) //попытка соединения
 	if err == nil {
 		sess.upstreamFD = ufd
 		s.sessions[ufd] = sess
@@ -451,7 +463,7 @@ func (s *ProxyServer) startUpstreamConnect(sess *Session, ip [4]byte) {
 		return
 	}
 
-	if errors.Is(err, unix.EINPROGRESS) {
+	if errors.Is(err, unix.EINPROGRESS) { //норм
 		sess.upstreamFD = ufd
 		sess.connectAt = time.Now()
 		s.sessions[ufd] = sess
@@ -479,12 +491,12 @@ func (s *ProxyServer) handleUpstreamEvent(sess *Session, revents int16) {
 		return
 	}
 
-	if revents&(unix.POLLERR|unix.POLLNVAL) != 0 {
+	if revents&(unix.POLLERR|unix.POLLNVAL) != 0 { //обработка отрыва
 		s.closeSession(sess)
 		return
 	}
 
-	if revents&(unix.POLLIN|unix.POLLHUP) != 0 {
+	if revents&(unix.POLLIN|unix.POLLHUP) != 0 { //чтение ответа от сайта (6 требование)
 		var tmp [bufSize]byte
 		avail := sess.u2c.Avail()
 		if avail > 0 {
@@ -500,7 +512,7 @@ func (s *ProxyServer) handleUpstreamEvent(sess *Session, revents int16) {
 		}
 	}
 
-	if revents&unix.POLLOUT != 0 && sess.c2u.Len() > 0 {
+	if revents&unix.POLLOUT != 0 && sess.c2u.Len() > 0 { //6 требование
 		n, err := unix.Write(sess.upstreamFD, sess.c2u.Bytes())
 		if n > 0 {
 			sess.c2u.Consume(n)
@@ -513,7 +525,8 @@ func (s *ProxyServer) handleUpstreamEvent(sess *Session, revents int16) {
 	s.checkHalfCloseAndFinish(sess)
 }
 
-//аккуратный half-close: закрываем запись когда буфер опустел, а оба сокета — когда всё доехало
+//6 требование
+//мягкий half-close: закрываем запись когда буфер опустел, а оба сокета — когда всё дошло
 func (s *ProxyServer) checkHalfCloseAndFinish(sess *Session) {
 	if sess.clientEOF && sess.c2u.Len() == 0 && sess.upstreamFD != -1 && !sess.upstreamShutWR {
 		_ = unix.Shutdown(sess.upstreamFD, unix.SHUT_WR)
@@ -528,13 +541,13 @@ func (s *ProxyServer) checkHalfCloseAndFinish(sess *Session) {
 	}
 }
 
-func (s *ProxyServer) queueSuccessReply(sess *Session) {
+func (s *ProxyServer) queueSuccessReply(sess *Session) { //собирает ответ успеха (1 требование)
 	reply := []byte{socksVersion5, repSucceeded, 0x00, atypIPv4, 0, 0, 0, 0, 0, 0}
 	sess.u2c.Write(reply)
 	sess.state = StateReplyWrite
 }
 
-func (s *ProxyServer) sendReplyAndClose(sess *Session, rep byte) {
+func (s *ProxyServer) sendReplyAndClose(sess *Session, rep byte) { //собирает пакет ошибки (1 требование)
 	reply := []byte{socksVersion5, rep, 0x00, atypIPv4, 0, 0, 0, 0, 0, 0}
 	sess.u2c.Write(reply)
 	sess.state = StateReplyWrite
