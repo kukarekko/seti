@@ -1,18 +1,18 @@
 package main
-
 import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"runtime"
 	"strconv"
+	"golang.org/x/sys/unix"
 )
-
 func main() {
-	//привязываем к одному потоку ОС, чтобы не плодить треды
-	runtime.LockOSThread() //5 требование
+	runtime.LockOSThread() //5 требование, привязывает глав горутину к одному потоку
+	signal.Ignore(unix.SIGPIPE)
 
-	//2 требование: 1-й аргумент обязательный (порт), 2-й необязательный (IPv4:port DNS-резолвера)
+	//1-й арг порт прокси, 2-й необяз порт DNS-резолвера (2 требование)
 	if len(os.Args) < 2 || len(os.Args) > 3 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <port> [dns_ipv4:port]\n", os.Args[0])
 		os.Exit(1)
@@ -24,11 +24,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	//2 требование: парсим второй необязательный аргумент адрес DNS-резолвера
+	//разбор адреса DNS-резолвера, 2 требование
 	var customDNSIP net.IP
 	var customDNSPort int
 	if len(os.Args) == 3 {
-		host, portStr, err := net.SplitHostPort(os.Args[2])
+		host, portStr, err := net.SplitHostPort(os.Args[2]) //разделяет на ip адрес и порт
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid DNS address (expected IPv4:port): %s\n", os.Args[2])
 			os.Exit(1)
@@ -38,7 +38,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Invalid DNS IPv4: %s\n", host)
 			os.Exit(1)
 		}
-		dPort, err := strconv.Atoi(portStr)
+		dPort, err := strconv.Atoi(portStr) //в число
 		if err != nil || dPort < 1 || dPort > 65535 {
 			fmt.Fprintf(os.Stderr, "Invalid DNS port: %s\n", portStr)
 			os.Exit(1)

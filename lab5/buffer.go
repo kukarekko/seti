@@ -1,14 +1,13 @@
 package main
 
-//фиксированный размер буфера на одно направление (чтобы не жрать память)
-const bufSize = 32 * 1024 //8 требование
-
+//фиксированный размер буфера на одно направление, 8 требование
+const bufSize = 32 * 1024
 type Buffer struct {
 	data [bufSize]byte
 	r, w int
 }
 
-//сколько байт сейчас лежит в буфере
+//сколько байт сейчас в буфере
 func (b *Buffer) Len() int {
 	return b.w - b.r
 }
@@ -18,7 +17,6 @@ func (b *Buffer) Avail() int {
 	return len(b.data) - b.w
 }
 
-//пишем данные в буфер, при необходимости сдвигаем непрочитанный хвост в начало
 func (b *Buffer) Write(p []byte) int {
 	if b.r == b.w {
 		b.r, b.w = 0, 0
